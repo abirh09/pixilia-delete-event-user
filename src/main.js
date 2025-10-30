@@ -17,6 +17,12 @@ export default async function deleteEvent(context) {
     return context.res.json({ statusCode: 400, error: 'Missing eventId' });
   }
 
+  // 0️⃣ Ensure the user is authenticated
+  if (!context.userId) {
+    context.error('❌ Unauthorized request – no userId found in context');
+    return context.res.json({ statusCode: 401, error: 'Unauthorized – user not logged in' });
+  }
+
   const client = new Client()
     .setEndpoint(process.env.APPWRITE_ENDPOINT)
     .setProject(process.env.APPWRITE_PROJECT_ID)
@@ -29,16 +35,24 @@ export default async function deleteEvent(context) {
   const photoCollectionId = process.env.APPWRITE_PHOTO_COLLECTION_ID;
   const eventCollectionId = process.env.APPWRITE_EVENT_COLLECTION_ID;
   const bucketId = process.env.APPWRITE_BUCKET_ID;
-  const currentUserId = context.userId;
+
+  const currentUserId = String(context.userId);
 
   try {
-    // 1️⃣ Get the event document
+    // 1️⃣ Fetch event document
     const eventDoc = await databases.getDocument(databaseId, eventCollectionId, eventId);
-    if (!eventDoc) return context.res.json({ statusCode: 404, error: 'Event not found' });
+    if (!eventDoc) {
+      return context.res.json({ statusCode: 404, error: 'Event not found' });
+    }
 
-    // 2️⃣ Verify ownership
-    if (eventDoc.owner_id !== currentUserId) {
-      return context.res.json({ statusCode: 403, error: 'Not allowed to delete this event' });
+    // 2️⃣ Verify ownership using user_id field
+    const eventUserId = String(eventDoc.user_id || '').trim();
+    if (eventUserId !== currentUserId) {
+      context.error(`❌ Ownership mismatch: event.user_id=${eventUserId}, user=${currentUserId}`);
+      return context.res.json({
+        statusCode: 403,
+        error: 'Forbidden – you do not own this event',
+      });
     }
 
     context.log(`🔒 Ownership verified for user ${currentUserId}`);
@@ -57,49 +71,40 @@ export default async function deleteEvent(context) {
       ]);
 
       if (response.documents.length === 0) break;
-
       allPhotos.push(...response.documents);
       offset += response.documents.length;
-
       if (response.documents.length < limit) break;
     }
 
     context.log(`📸 Total photos to delete: ${allPhotos.length}`);
 
-    // 4️⃣ Delete photos in parallel (both storage file and document)
+    // 4️⃣ Delete photos (storage + docs) in parallel chunks
     const chunkSize = 20;
-    const photoChunks = [];
-
     for (let i = 0; i < allPhotos.length; i += chunkSize) {
-      photoChunks.push(allPhotos.slice(i, i + chunkSize));
-    }
-
-    for (const chunk of photoChunks) {
+      const chunk = allPhotos.slice(i, i + chunkSize);
       await Promise.allSettled(
         chunk.map(async (photo) => {
-          // Delete storage file
           if (photo.file_id) {
             try {
               await storage.deleteFile(bucketId, photo.file_id);
               context.log(`🗑️ Deleted file ${photo.file_id}`);
             } catch (err) {
-              context.error(`⚠️ Failed to delete file ${photo.file_id}: ${err.message}`);
+              context.error(`⚠️ Could not delete file ${photo.file_id}: ${err.message}`);
             }
           }
-          // Delete photo document
           try {
             await databases.deleteDocument(databaseId, photoCollectionId, photo.$id);
-            context.log(`🗑️ Deleted photo document ${photo.$id}`);
+            context.log(`🗑️ Deleted photo ${photo.$id}`);
           } catch (err) {
-            context.error(`⚠️ Failed to delete photo document ${photo.$id}: ${err.message}`);
+            context.error(`⚠️ Could not delete photo doc ${photo.$id}: ${err.message}`);
           }
         })
       );
     }
 
-    // 5️⃣ Delete the event document
+    // 5️⃣ Delete the event itself
     await databases.deleteDocument(databaseId, eventCollectionId, eventId);
-    context.log(`🗑️ Deleted event document ${eventId}`);
+    context.log(`🗑️ Deleted event ${eventId}`);
 
     return context.res.json({
       statusCode: 200,
@@ -109,6 +114,7 @@ export default async function deleteEvent(context) {
     });
   } catch (error) {
     context.error('❌ Error deleting event: ' + error.message);
+    context.error(error.stack);
     return context.res.json({ statusCode: 500, error: error.message });
   }
 }
