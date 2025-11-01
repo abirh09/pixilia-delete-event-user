@@ -5,7 +5,11 @@ export default async function deleteEvent(context) {
 
   let payload = {};
   try {
-    if (context.req.bodyRaw) payload = JSON.parse(context.req.bodyRaw);
+    context.log('📥 Parsing request body...');
+    if (context.req.bodyRaw) {
+      payload = JSON.parse(context.req.bodyRaw);
+      context.log('✅ Request body parsed:', payload);
+    }
   } catch (err) {
     context.error('❌ Invalid JSON in request body: ' + err.message);
     return context.res.json({ statusCode: 400, error: 'Invalid JSON in request body' });
@@ -16,11 +20,13 @@ export default async function deleteEvent(context) {
     context.error('❌ Missing eventId in request body');
     return context.res.json({ statusCode: 400, error: 'Missing eventId' });
   }
+  context.log(`📌 Event ID received: ${eventId}`);
 
   const client = new Client()
     .setEndpoint(process.env.APPWRITE_ENDPOINT)
     .setProject(process.env.APPWRITE_PROJECT_ID)
     .setKey(process.env.APPWRITE_API_KEY);
+  context.log('🔗 Appwrite client initialized');
 
   const databases = new Databases(client);
   const storage = new Storage(client);
@@ -29,18 +35,24 @@ export default async function deleteEvent(context) {
   const photoCollectionId = process.env.APPWRITE_PHOTO_COLLECTION_ID;
   const eventCollectionId = process.env.APPWRITE_EVENT_COLLECTION_ID;
   const bucketId = process.env.APPWRITE_BUCKET_ID;
-  const headers = req.headers
+
+  const headers = context.req.headers;
   const currentUserId = headers['x-appwrite-user-id'];
-  // const currentUserId = context.userId;
+  context.log(`👤 Current user ID from headers: ${currentUserId}`);
 
   try {
     // 1️⃣ Get the event document
+    context.log(`🔹 Fetching event document ${eventId}...`);
     const eventDoc = await databases.getDocument(databaseId, eventCollectionId, eventId);
-    if (!eventDoc) return context.res.json({ statusCode: 404, error: 'Event not found' });
-
+    if (!eventDoc) {
+      context.log('⚠️ Event document not found');
+      return context.res.json({ statusCode: 404, error: 'Event not found' });
+    }
+    context.log('✅ Event document fetched:', eventDoc);
 
     // 2️⃣ Verify ownership using user_id field
     const eventUserId = String(eventDoc.user_id || '').trim();
+    context.log(`🔑 Event owner: ${eventUserId}`);
     if (eventUserId !== currentUserId) {
       context.error(`❌ Ownership mismatch: event.user_id=${eventUserId}, user=${currentUserId}`);
       return context.res.json({
@@ -48,22 +60,23 @@ export default async function deleteEvent(context) {
         error: 'Forbidden – you do not own this event',
       });
     }
-
     context.log(`🔒 Ownership verified for user ${currentUserId}`);
 
     // 3️⃣ Fetch all photos for this event with pagination
     const limit = 100;
     let offset = 0;
     let allPhotos = [];
-
     context.log(`🔹 Fetching photos for event ${eventId} in pages of ${limit}...`);
+
     while (true) {
+      context.log(`📄 Fetching photos offset=${offset}...`);
       const response = await databases.listDocuments(databaseId, photoCollectionId, [
         Query.equal('event_id', eventId),
         Query.limit(limit),
         Query.offset(offset),
       ]);
 
+      context.log(`📄 Fetched ${response.documents.length} photos`);
       if (response.documents.length === 0) break;
 
       allPhotos.push(...response.documents);
@@ -77,12 +90,13 @@ export default async function deleteEvent(context) {
     // 4️⃣ Delete photos in parallel (both storage file and document)
     const chunkSize = 20;
     const photoChunks = [];
-
     for (let i = 0; i < allPhotos.length; i += chunkSize) {
       photoChunks.push(allPhotos.slice(i, i + chunkSize));
     }
+    context.log(`🔹 Deleting photos in ${photoChunks.length} chunks of up to ${chunkSize} each...`);
 
-    for (const chunk of photoChunks) {
+    for (const [index, chunk] of photoChunks.entries()) {
+      context.log(`🔹 Processing chunk ${index + 1}/${photoChunks.length}`);
       await Promise.allSettled(
         chunk.map(async (photo) => {
           // Delete storage file
@@ -106,9 +120,11 @@ export default async function deleteEvent(context) {
     }
 
     // 5️⃣ Delete the event document
+    context.log(`🔹 Deleting event document ${eventId}...`);
     await databases.deleteDocument(databaseId, eventCollectionId, eventId);
     context.log(`🗑️ Deleted event document ${eventId}`);
 
+    context.log('✅ Event deletion process completed successfully');
     return context.res.json({
       statusCode: 200,
       message: 'Event and all associated photos deleted successfully',
