@@ -29,7 +29,9 @@ export default async function deleteEvent(context) {
   const photoCollectionId = process.env.APPWRITE_PHOTO_COLLECTION_ID;
   const eventCollectionId = process.env.APPWRITE_EVENT_COLLECTION_ID;
   const bucketId = process.env.APPWRITE_BUCKET_ID;
-  const currentUserId = context.userId;
+  const headers = req.headers
+  const currentUserId = headers['x-appwrite-user-id'];
+  // const currentUserId = context.userId;
 
   try {
     // 1️⃣ Get the event document
